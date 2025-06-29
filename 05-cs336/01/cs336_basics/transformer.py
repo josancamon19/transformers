@@ -30,6 +30,7 @@ class Linear(nn.Module):
         self.out = out
         self.weights = nn.Parameter(torch.empty((out, inp), device=device, dtype=dtype))
         self.bias = None if not bias else nn.Parameter(torch.zeros((out,), device=device, dtype=dtype))
+        self.reset_parameters()
 
     def reset_parameters(self) -> None:
         std = math.sqrt(2 / (self.inp + self.out))
@@ -76,23 +77,19 @@ def silu(w_out: torch.Tensor):
     pass
 
 
-torch.manual_seed(42)
-inp = torch.tensor([0, 1, 2, 3])
-inp2 = torch.tensor([4, 5, 6, 7])
-batched_inp = torch.stack([inp, inp2])
-e = Embedding(10, 4)
-e_out = e(batched_inp)
-# l1 = Linear(2, 4, False)
-# print("l1.data", l1.weights.data)
-# l1_out = l1(e(batched_inp))
-print(e_out)
-silu(e_out)
+# torch.manual_seed(42)
+# inp = torch.tensor([0, 1, 2, 3])
+# inp2 = torch.tensor([4, 5, 6, 7])
+# batched_inp = torch.stack([inp, inp2])
+# e = Embedding(10, 4)
+# e_out = e(batched_inp)
+# # l1 = Linear(2, 4, False)
+# # print("l1.data", l1.weights.data)
+# # l1_out = l1(e(batched_inp))
+# print(e_out)
+# silu(e_out)
 
 
-
-# TODO: optimize computation MultiHeadSelfAttention batch,layer,seq,embeddings
-# TODO: Custom LayerNorm
-# TODO: RMSNorm + Understanding
 # TODO: implement ReLU/SwiGLU + Understanding
 # TODO: AdamW
 # TODO: lr scheduler + gradient clipping
@@ -102,60 +99,71 @@ silu(e_out)
 # TODO: train, Tiny
 
 
-class SelfAttention(nn.Module):
-    def __init__(self, embedding_dim, num_heads):
-        super().__init__()
-        head_size = embedding_dim // num_heads
-        # print("SelfAttention.__init__:", shape)
-        self.Q = Linear(embedding_dim, head_size)
-        self.K = Linear(embedding_dim, head_size)
-        self.V = Linear(embedding_dim, head_size)
-
-    def forward(self, x, padding_mask):
-        # batch, seq_length, embedding_dim
-        q = x @ self.Q
-        k = x @ self.K
-        v = x @ self.V
-
-        # print("SelfAttention.forward q.shape:", q.shape)
-        attention_scores = q @ k.transpose(1, 2)
-        causal_mask = torch.tril(torch.ones((x.shape[1], x.shape[1]))).to(self.Q.device)
-        mask = causal_mask * padding_mask.unsqueeze(1) if padding_mask is not None else causal_mask
-        attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
-        # print(attention_scores)
-        # TODO: figoure out the output of 7,7, which i,j refer to which tokens
-
-        # print("SelfAttention.forward attention_scores:", attention_scores.shape)
-        attention_weights = torch.softmax(attention_scores / math.sqrt(k.shape[-1]), dim=-1)
-        # print(attention_weights)
-        # print("SelfAttention.forward attention_weights:", attention_weights.shape)
-        output = attention_weights @ v
-        # print("SelfAttention.forward output:", output.shape)
-        return output
-
-
 class MultiHeadSelfAttention(nn.Module):
     def __init__(self, embedding_dim, num_heads):
         super().__init__()
-        self.attention = nn.Sequential(*[SelfAttention(embedding_dim, num_heads) for _ in range(num_heads)])
+        self.num_heads = num_heads
+        self.head_size = embedding_dim // num_heads
+        self.Q = Linear(embedding_dim, self.head_size * self.num_heads)
+        self.K = Linear(embedding_dim, self.head_size * self.num_heads)
+        self.V = Linear(embedding_dim, self.head_size * self.num_heads)
         self.W_O = Linear(embedding_dim, embedding_dim)
 
+    def _reshape_to_heads(self, batch, seq_length, tensor):
+        return tensor.view(batch, seq_length, self.num_heads, self.head_size).transpose(2, 1)
+
     def forward(self, x, padding_mask):
-        # print(x.shape)
-        output = [head(x, padding_mask) for head in self.attention]
-        output = torch.cat(output, dim=-1)
-        wo = output @ self.W_O
-        # print("MultiHeadSelfAttention.forward wo.shape:", wo.shape)
+        # print(x)
+        batch, seq_length = x.shape[0], x.shape[1]
+        q = self._reshape_to_heads(batch, seq_length, self.Q(x))
+        k = self._reshape_to_heads(batch, seq_length, self.K(x))
+        v = self._reshape_to_heads(batch, seq_length, self.V(x))
+
+        attention_scores = q @ k.transpose(-2, -1)
+
+        causal_mask = torch.tril(torch.ones((seq_length, seq_length))).to(q.device)
+        mask = (causal_mask * (padding_mask.unsqueeze(1) if padding_mask is not None else 1)).unsqueeze(1)
+        attention_scores = torch.masked_fill(attention_scores, mask == 0, -1e9)
+        attention_weights = torch.softmax(attention_scores / math.sqrt(self.head_size), dim=-1)
+        # print(attention_weights[0][0])
+        x = attention_weights @ v
+        x = x.transpose(-2, -1).contiguous().view(batch, seq_length, -1)
+        wo = self.W_O(x)
+        print("MultiHeadSelfAttention.forward wo.shape:", wo.shape)
         return wo
+
+
+tokenizer = GPT2Tokenizer.from_pretrained("openai-community/gpt2")
+max_sequence_length = 100
+embedding_dim = 128
+num_layers = 1
+num_heads = 8
+
+tokenizer.pad_token = "[PAD]"
+tokenized = tokenizer(
+    ["Hi there, this is a test", "hey"],
+    return_tensors="pt",
+    padding=True,
+    truncation=True,
+)
+e_out = Embedding(tokenizer.vocab_size, embedding_dim)(tokenized["input_ids"])
+mhsa = MultiHeadSelfAttention(embedding_dim, num_heads)
+mhsa(e_out, tokenized["attention_mask"])
+# print(f"input:\n{tokenized['input_ids']}")
+# print(tokenized["attention_mask"])
+# tokens = tokenized["input_ids"]
+# e_out = Embedding(tokenizer.vocab_size, embedding_dim)(tokens)
+# mhsa = MultiHeadSelfAttention(embedding_dim, num_heads)
+# attention = mhsa(tokens, tokenized["attention_mask"])
 
 
 class TransformerBlock(nn.Module):
     def __init__(self, embedding_dim, num_heads):
         super().__init__()
-        self.pre_mhsa_norm = nn.LayerNorm(embedding_dim)
+        self.pre_mhsa_norm = RMSNorm(embedding_dim)
         self.mhsa = MultiHeadSelfAttention(embedding_dim, num_heads)
 
-        self.pre_mlp_norm = nn.LayerNorm(embedding_dim)
+        self.pre_mlp_norm = RMSNorm(embedding_dim)
 
         self.mlp_in = Linear(embedding_dim, embedding_dim * 4, True)
         self.relu = F.relu
@@ -188,7 +196,7 @@ class Transformer(nn.Module):
         self.register_buffer("pe", pe)
 
         self.blocks = nn.ModuleList(TransformerBlock(embedding_dim, num_heads) for _ in range(num_layers))
-        self.pre_output_norm = nn.LayerNorm(embedding_dim)
+        self.pre_output_norm = RMSNorm(embedding_dim)
         self.output = nn.Parameter(torch.empty(embedding_dim, vocab_size))
         nn.init.normal_(self.output, std=0.02)
 
@@ -203,22 +211,3 @@ class Transformer(nn.Module):
         # print("Transformer.forward output.shape:", output.shape)
         # return torch.softmax(output, dim=-1)
         return output  # output logits
-
-
-# tokenizer = GPT2Tokenizer.from_pretrained("openai-community/gpt2")
-# max_sequence_length = 100
-# embedding_dim = 128
-# num_layers = 1
-# num_heads = 1
-
-# tokenizer.pad_token = "[PAD]"
-# tokenized = tokenizer(
-#     ["Hi there, this is a test", "hey"],
-#     return_tensors="pt",
-#     padding=True,
-#     truncation=True,
-# )
-# print(f"input:\n{tokenized['input_ids']}")
-# print(tokenized["attention_mask"])
-# tf = Transformer(tokenizer.vocab_size, max_sequence_length, embedding_dim, num_layers, num_heads)
-# prob_dist = tf(tokenized["input_ids"], tokenized["attention_mask"])
