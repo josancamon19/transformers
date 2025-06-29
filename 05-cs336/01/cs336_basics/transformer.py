@@ -13,14 +13,32 @@ from transformers import GPT2Tokenizer
 # • The torch.optim.Optimizer base class
 
 
-class EmbeddingLayer(nn.Module):
+class Embedding(nn.Module):
     def __init__(self, vocab_size: int, embed_dim):
         super().__init__()
         self.embeddings = nn.Parameter(torch.empty((vocab_size, embed_dim)))
-        nn.init.normal_(self.embeddings, mean=0, std=0.02)
+        nn.init.trunc_normal_(self.embeddings, mean=0, std=1, a=-3, b=3)
 
-    def forward(self, token_ids: torch.tensor):
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings[token_ids]
+
+
+class Linear(nn.Module):
+    def __init__(self, inp: int, out: int, bias: bool = False, device: torch.device = None, dtype: torch.dtype = None):
+        super().__init__()
+        self.inp = inp
+        self.out = out
+        self.weights = nn.Parameter(torch.empty((out, inp), device=device, dtype=dtype))
+        self.bias = None if not bias else nn.Parameter(torch.zeros((out,), device=device, dtype=dtype))
+
+    def reset_parameters(self) -> None:
+        std = math.sqrt(2 / (self.inp + self.out))
+        nn.init.trunc_normal_(self.weights, mean=0, std=std, a=-3 * std, b=3 * std)
+
+    def forward(self, x):
+        if self.bias is not None:
+            return x @ self.weights.T + self.bias
+        return x @ self.weights.T
 
 
 def get_positional_encodings(embed_dim, max_positions=3):
@@ -34,24 +52,64 @@ def get_positional_encodings(embed_dim, max_positions=3):
     return pe
 
 
-# TODO: Custom LayerNorm
-# TODO: implement ReLU/SwiGLU
+class RMSNorm(nn.Module):
+    def __init__(self, embedding_dim: int, eps: float = 1e-5):
+        # TODO: understand reasoning, not only implement
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.eps = eps
+        self.gain = Parameter(torch.ones(embedding_dim))
+
+    def forward(self, x):
+        # TODO: gpt recommends formula is not clear, review
+        # --- identify variance/means comp and name properly
+        x_dtype = x.dtype
+        x = x.to(torch.float32)
+        tsum = torch.sum(torch.pow(x, 2) + self.eps, dim=2)
+        div_term = torch.sqrt((1 / self.embedding_dim) * tsum).unsqueeze(2)
+        result = torch.divide(x, div_term) * self.gain
+        return result.to(x_dtype)
+
+
+def silu(w_out: torch.Tensor):
+    return w_out * torch.sigmoid(w_out)
+    pass
+
+
+torch.manual_seed(42)
+inp = torch.tensor([0, 1, 2, 3])
+inp2 = torch.tensor([4, 5, 6, 7])
+batched_inp = torch.stack([inp, inp2])
+e = Embedding(10, 4)
+e_out = e(batched_inp)
+# l1 = Linear(2, 4, False)
+# print("l1.data", l1.weights.data)
+# l1_out = l1(e(batched_inp))
+print(e_out)
+silu(e_out)
+
+
+
 # TODO: optimize computation MultiHeadSelfAttention batch,layer,seq,embeddings
+# TODO: Custom LayerNorm
+# TODO: RMSNorm + Understanding
+# TODO: implement ReLU/SwiGLU + Understanding
+# TODO: AdamW
+# TODO: lr scheduler + gradient clipping
+# TODO: checkpointing, wandb
+# TODO: inference
+# TODO: Read the actual document
+# TODO: train, Tiny
 
 
 class SelfAttention(nn.Module):
     def __init__(self, embedding_dim, num_heads):
         super().__init__()
         head_size = embedding_dim // num_heads
-        shape = (embedding_dim, head_size)
         # print("SelfAttention.__init__:", shape)
-        self.Q = Parameter(torch.zeros(shape))
-        self.K = Parameter(torch.zeros(shape))
-        self.V = Parameter(torch.zeros(shape))
-
-        nn.init.normal_(self.Q, std=0.02)
-        nn.init.normal_(self.K, std=0.02)
-        nn.init.normal_(self.V, std=0.02)
+        self.Q = Linear(embedding_dim, head_size)
+        self.K = Linear(embedding_dim, head_size)
+        self.V = Linear(embedding_dim, head_size)
 
     def forward(self, x, padding_mask):
         # batch, seq_length, embedding_dim
@@ -80,8 +138,7 @@ class MultiHeadSelfAttention(nn.Module):
     def __init__(self, embedding_dim, num_heads):
         super().__init__()
         self.attention = nn.Sequential(*[SelfAttention(embedding_dim, num_heads) for _ in range(num_heads)])
-        self.W_O = nn.Parameter(torch.zeros((embedding_dim, embedding_dim)))
-        nn.init.normal_(self.W_O, std=0.02)
+        self.W_O = Linear(embedding_dim, embedding_dim)
 
     def forward(self, x, padding_mask):
         # print(x.shape)
@@ -99,14 +156,10 @@ class TransformerBlock(nn.Module):
         self.mhsa = MultiHeadSelfAttention(embedding_dim, num_heads)
 
         self.pre_mlp_norm = nn.LayerNorm(embedding_dim)
-        self.mlp_in = nn.Parameter(torch.zeros((embedding_dim, 4 * embedding_dim)))
-        self.mlp_in_bias = nn.Parameter(torch.zeros((embedding_dim * 4,)))
-        self.relu = F.relu
-        self.mlp_out = nn.Parameter(torch.zeros((4 * embedding_dim, embedding_dim)))
-        self.mlp_out_bias = nn.Parameter(torch.zeros((embedding_dim,)))
 
-        nn.init.normal_(self.mlp_in, std=0.02)
-        nn.init.normal_(self.mlp_out, std=0.02)
+        self.mlp_in = Linear(embedding_dim, embedding_dim * 4, True)
+        self.relu = F.relu
+        self.mlp_out = Linear(4 * embedding_dim, embedding_dim, True)
 
     def forward(self, x, padding_mask):
         x = self.pre_mhsa_norm(x)
@@ -130,7 +183,7 @@ class Transformer(nn.Module):
         num_heads: int,
     ):
         super().__init__()
-        self.embeddings = EmbeddingLayer(vocab_size, embedding_dim)
+        self.embeddings = Embedding(vocab_size, embedding_dim)
         pe = get_positional_encodings(embedding_dim, max_sequence_length)
         self.register_buffer("pe", pe)
 
