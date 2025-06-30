@@ -53,10 +53,10 @@ def get_positional_encodings(embed_dim, max_positions=4):
     return pe
 
 
-def get_rope_cache(embedding_dim: int, max_positions: int):
+def get_rope_cache(embedding_dim: int, max_positions: int, theta: int = 10000):
     assert embedding_dim % 2 == 0
     i = torch.arange(embedding_dim / 2, dtype=torch.float32)
-    theta_i = 10000 ** (-2 * (i - 1) / embedding_dim)
+    theta_i = theta ** (-2 * (i - 1) / embedding_dim)
     positions = torch.arange(max_positions).unsqueeze(1)
 
     thetas = positions * theta_i
@@ -111,33 +111,39 @@ class RMSNorm(nn.Module):
         return result.to(x_dtype)
 
 
-def silu(w_out: torch.Tensor):
-    return w_out * torch.sigmoid(w_out)
-    pass
+class PosWiseFFN(nn.Module):
+    # TODO: understand the reasoning of SiLU and SwiGLU
+    # We offer no explanation as to why these architectures seem to work; we attribute their success,
+    # as all else, to divine benevolence
+    def __init__(self, embedding_dim: int):
+        super().__init__()
+        dff = int(8 * embedding_dim / 3)
+        self.W1 = Linear(embedding_dim, dff)
+        self.W2 = Linear(dff, embedding_dim)
+        self.W3 = Linear(embedding_dim, dff)
+
+    @staticmethod
+    def silu(x):
+        return x * torch.sigmoid(x)
+
+    def forward(self, x):
+        silu = PosWiseFFN.silu(self.W1(x))
+        return self.W2(silu * self.W3(x))
 
 
-# torch.manual_seed(42)
-# inp = torch.tensor([0, 1, 2, 3])
-# inp2 = torch.tensor([4, 5, 6, 7])
-# batched_inp = torch.stack([inp, inp2])
-# e = Embedding(10, 4)
-# e_out = e(batched_inp)
-# # l1 = Linear(2, 4, False)
-# # print("l1.data", l1.weights.data)
-# # l1_out = l1(e(batched_inp))
-# print(e_out)
-# silu(e_out)
+# TODO: implement softmax
+# TODO: code organization to pass tests
+# TODO: improve general code structure
 
-
-# TODO: implement ReLU/SwiGLU + Understanding
-# TODO: build softmax
+# TODO: SGD
 # TODO: AdamW
-
 # TODO: checkpointing, wandb
 # TODO: inference
 # TODO: Read the actual document
 # TODO: train, Tiny
 # TODO: lr scheduler + gradient clipping
+
+# TODO: Muon
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -185,24 +191,14 @@ class MultiHeadSelfAttention(nn.Module):
 class TransformerBlock(nn.Module):
     def __init__(self, embedding_dim, num_heads, max_sequence_length):
         super().__init__()
-        self.pre_mhsa_norm = RMSNorm(embedding_dim)
-        self.mhsa = MultiHeadSelfAttention(embedding_dim, num_heads, max_sequence_length)
-
-        self.pre_mlp_norm = RMSNorm(embedding_dim)
-
-        self.mlp_in = Linear(embedding_dim, embedding_dim * 4, True)
-        self.relu = F.relu
-        self.mlp_out = Linear(4 * embedding_dim, embedding_dim, True)
+        self.attention_norm = RMSNorm(embedding_dim)
+        self.attention = MultiHeadSelfAttention(embedding_dim, num_heads, max_sequence_length)
+        self.pos_wise_norm = RMSNorm(embedding_dim)
+        self.pos_wise = PosWiseFFN(embedding_dim)
 
     def forward(self, x, padding_mask):
-        x = self.pre_mhsa_norm(x)
-        attention = self.mhsa(x, padding_mask) + x
-
-        attention_norm = self.pre_mlp_norm(attention)
-        proj_in = self.mlp_in(attention_norm)
-        proj_in_activated = self.relu(proj_in)
-        proj_out = self.mlp_out(proj_in_activated)
-        output = proj_out + attention
+        attention = self.attention(self.attention_norm(x), padding_mask) + x
+        output = self.pos_wise(self.pos_wise_norm(attention)) + attention
         return output
 
 
