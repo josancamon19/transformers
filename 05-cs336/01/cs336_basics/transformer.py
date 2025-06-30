@@ -42,7 +42,7 @@ class Linear(nn.Module):
         return x @ self.weights.T
 
 
-def get_positional_encodings(embed_dim, max_positions=3):
+def get_positional_encodings(embed_dim, max_positions=4):
     positions = torch.arange(max_positions).unsqueeze(1)
     dim_indices = torch.arange(0, embed_dim, 2)  # TODO: not sure if this part is clear
     div_term = 10000 ** (dim_indices / embed_dim)
@@ -51,6 +51,45 @@ def get_positional_encodings(embed_dim, max_positions=3):
     pe[:, 0::2] = torch.sin(positions / div_term)
     pe[:, 1::2] = torch.cos(positions / div_term)
     return pe
+
+
+def get_rope_cache(embedding_dim: int, max_positions: int):
+    assert embedding_dim % 2 == 0
+    i = torch.arange(embedding_dim / 2, dtype=torch.float32)
+    theta_i = 10000 ** (-2 * (i - 1) / embedding_dim)
+    positions = torch.arange(max_positions).unsqueeze(1)
+
+    thetas = positions * theta_i
+    cosines = torch.cos(thetas)
+    sines = torch.sin(thetas)
+    rope_cache = torch.stack([cosines, sines], dim=-1)
+    return rope_cache
+
+
+def apply_rope(x, rope_cache):
+    # print("apply_rope:", x.shape, rope_cache.shape)
+    # TODO: does it make a difference if I rotate before or after reshaping? - don't think so
+    batch_size, head_dim, head_size, embedding_dim = x.shape
+
+    rope_truncated = rope_cache[:head_size,]
+    # print("apply_rope rope_truncated.shape", rope_truncated.shape)
+    # view embedding dimensions in pairs
+    x_pairs = x.view(batch_size, head_dim, head_size, -1, 2)
+    x_pairs = x_pairs.to(torch.float16)
+    # print("apply_rope x_pairs.shape", x_pairs.shape)
+
+    # some black magic where complex numbers i,j parts can be computed like this
+    # TODO: this part below is definitely not clear
+    x_complex = torch.view_as_complex(x_pairs)
+    rope_complex = torch.view_as_complex(rope_truncated)
+    # print("apply_rope x_complex.shape", x_complex.shape, rope_complex.shape)
+    rotated_complex = x_complex * rope_complex
+    rotated_real = torch.view_as_real(rotated_complex)
+    # print("apply_rope rotated_real.shape", rotated_real.shape)
+    rotated_x = rotated_real.flatten(-2)
+    # print("apply_rope rotated_x.shape", rotated_x.shape)
+
+    return rotated_x
 
 
 class RMSNorm(nn.Module):
@@ -91,22 +130,30 @@ def silu(w_out: torch.Tensor):
 
 
 # TODO: implement ReLU/SwiGLU + Understanding
+# TODO: build softmax
 # TODO: AdamW
-# TODO: lr scheduler + gradient clipping
+
 # TODO: checkpointing, wandb
 # TODO: inference
 # TODO: Read the actual document
 # TODO: train, Tiny
+# TODO: lr scheduler + gradient clipping
 
 
 class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, embedding_dim, num_heads):
+    def __init__(self, embedding_dim, num_heads, max_sequence_length):
         super().__init__()
         self.num_heads = num_heads
         self.head_size = embedding_dim // num_heads
+        self.embedding_dim = embedding_dim
+
+        # TODO: what's the most optimal way of implementing this?
         self.Q = Linear(embedding_dim, self.head_size * self.num_heads)
         self.K = Linear(embedding_dim, self.head_size * self.num_heads)
         self.V = Linear(embedding_dim, self.head_size * self.num_heads)
+        rope = get_rope_cache(self.head_size, max_sequence_length)
+        self.register_buffer("rope_cache", rope)
+
         self.W_O = Linear(embedding_dim, embedding_dim)
 
     def _reshape_to_heads(self, batch, seq_length, tensor):
@@ -119,6 +166,8 @@ class MultiHeadSelfAttention(nn.Module):
         k = self._reshape_to_heads(batch, seq_length, self.K(x))
         v = self._reshape_to_heads(batch, seq_length, self.V(x))
 
+        q = apply_rope(q, self.rope_cache)
+        k = apply_rope(k, self.rope_cache)
         attention_scores = q @ k.transpose(-2, -1)
 
         causal_mask = torch.tril(torch.ones((seq_length, seq_length))).to(q.device)
@@ -129,39 +178,15 @@ class MultiHeadSelfAttention(nn.Module):
         x = attention_weights @ v
         x = x.transpose(-2, -1).contiguous().view(batch, seq_length, -1)
         wo = self.W_O(x)
-        print("MultiHeadSelfAttention.forward wo.shape:", wo.shape)
+        # print("MultiHeadSelfAttention.forward wo.shape:", wo.shape)
         return wo
 
 
-tokenizer = GPT2Tokenizer.from_pretrained("openai-community/gpt2")
-max_sequence_length = 100
-embedding_dim = 128
-num_layers = 1
-num_heads = 8
-
-tokenizer.pad_token = "[PAD]"
-tokenized = tokenizer(
-    ["Hi there, this is a test", "hey"],
-    return_tensors="pt",
-    padding=True,
-    truncation=True,
-)
-e_out = Embedding(tokenizer.vocab_size, embedding_dim)(tokenized["input_ids"])
-mhsa = MultiHeadSelfAttention(embedding_dim, num_heads)
-mhsa(e_out, tokenized["attention_mask"])
-# print(f"input:\n{tokenized['input_ids']}")
-# print(tokenized["attention_mask"])
-# tokens = tokenized["input_ids"]
-# e_out = Embedding(tokenizer.vocab_size, embedding_dim)(tokens)
-# mhsa = MultiHeadSelfAttention(embedding_dim, num_heads)
-# attention = mhsa(tokens, tokenized["attention_mask"])
-
-
 class TransformerBlock(nn.Module):
-    def __init__(self, embedding_dim, num_heads):
+    def __init__(self, embedding_dim, num_heads, max_sequence_length):
         super().__init__()
         self.pre_mhsa_norm = RMSNorm(embedding_dim)
-        self.mhsa = MultiHeadSelfAttention(embedding_dim, num_heads)
+        self.mhsa = MultiHeadSelfAttention(embedding_dim, num_heads, max_sequence_length)
 
         self.pre_mlp_norm = RMSNorm(embedding_dim)
 
@@ -174,9 +199,9 @@ class TransformerBlock(nn.Module):
         attention = self.mhsa(x, padding_mask) + x
 
         attention_norm = self.pre_mlp_norm(attention)
-        proj_in = attention_norm @ self.mlp_in + self.mlp_in_bias
+        proj_in = self.mlp_in(attention_norm)
         proj_in_activated = self.relu(proj_in)
-        proj_out = proj_in_activated @ self.mlp_out + self.mlp_out_bias
+        proj_out = self.mlp_out(proj_in_activated)
         output = proj_out + attention
         return output
 
@@ -192,22 +217,38 @@ class Transformer(nn.Module):
     ):
         super().__init__()
         self.embeddings = Embedding(vocab_size, embedding_dim)
-        pe = get_positional_encodings(embedding_dim, max_sequence_length)
-        self.register_buffer("pe", pe)
+        # pe = get_positional_encodings(embedding_dim, max_sequence_length)
+        # self.register_buffer("pe", pe)
 
-        self.blocks = nn.ModuleList(TransformerBlock(embedding_dim, num_heads) for _ in range(num_layers))
+        self.blocks = nn.ModuleList(
+            TransformerBlock(embedding_dim, num_heads, max_sequence_length) for _ in range(num_layers)
+        )
         self.pre_output_norm = RMSNorm(embedding_dim)
         self.output = nn.Parameter(torch.empty(embedding_dim, vocab_size))
         nn.init.normal_(self.output, std=0.02)
 
     def forward(self, input_ids, padding_mask):
-        # print(self.pe[: len(input_ids), :].shape)
-        tokens = self.embeddings(input_ids) + self.pe[: input_ids.shape[-1], :]
+        tokens = self.embeddings(input_ids)  #  + self.pe[: input_ids.shape[-1], :]
         for block in self.blocks:
             tokens = block(tokens, padding_mask)
 
         tokens = self.pre_output_norm(tokens)
         output = tokens @ self.output
-        # print("Transformer.forward output.shape:", output.shape)
-        # return torch.softmax(output, dim=-1)
         return output  # output logits
+
+
+tokenizer = GPT2Tokenizer.from_pretrained("openai-community/gpt2")
+max_sequence_length = 100
+embedding_dim = 128
+num_layers = 1
+num_heads = 8
+
+tokenizer.pad_token = "[PAD]"
+tokenized = tokenizer(
+    ["Hi there, this is a test", "hey"],
+    return_tensors="pt",
+    padding=True,
+    truncation=True,
+)
+model = Transformer(tokenizer.vocab_size, max_sequence_length, embedding_dim, num_layers, num_heads)
+model(tokenized["input_ids"], tokenized["attention_mask"])
