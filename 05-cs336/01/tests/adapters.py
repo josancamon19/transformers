@@ -8,8 +8,8 @@ from jaxtyping import Float, Int
 import numpy.typing as npt
 import torch
 from torch import Tensor
-from cs336_basics import tokenizer, train_tokenizer
-from cs336_basics.transformer import (
+from src import tokenizer, train_tokenizer
+from src.transformer import (
     Linear,
     Embedding,
     RMSNorm,

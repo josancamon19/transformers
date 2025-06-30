@@ -2,7 +2,7 @@ from collections import defaultdict
 import json
 import os
 from line_profiler import profile
-from cs336_basics.shared import timeit
+from src.shared import timeit
 import regex as re
 import heapq
 

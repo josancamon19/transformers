@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 from transformers import GPT2Tokenizer
-from cs336_basics.transformer import Transformer
+from src.transformer import Transformer
 from torch.optim import AdamW
 import torch.nn.functional as F
 import os

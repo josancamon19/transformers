@@ -165,3 +165,7 @@ cython_debug/
 data/
 profile_output*
 karpathy_minbpe
+result.json
+*hf.json
+*sample_file.txt
+tests/fixtures/snapshots/*.json

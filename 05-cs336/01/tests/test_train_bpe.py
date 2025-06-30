@@ -1,6 +1,6 @@
 import json
 
-from cs336_basics.shared import print_execution_summary
+from src.shared import print_execution_summary
 from .adapters import run_train_bpe
 from .common import FIXTURES_PATH, gpt2_bytes_to_unicode
 import time

@@ -11,7 +11,7 @@
 from collections import defaultdict
 from typing import Iterable, Iterator  # noqa: UP035
 import regex as re
-from cs336_basics.shared import timeit, init_vocabulary, find_chunk_boundaries
+from src.shared import timeit, init_vocabulary, find_chunk_boundaries
 
 
 # @timeit

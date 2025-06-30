@@ -138,7 +138,6 @@ def softmax(tensor: torch.Tensor, dim: int = 0):
     return num_part / div_term
 
 
-# TODO: code organization to pass tests
 # TODO: improve general code structure
 
 # TODO: SGD
