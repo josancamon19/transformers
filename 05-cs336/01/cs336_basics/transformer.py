@@ -131,7 +131,13 @@ class PosWiseFFN(nn.Module):
         return self.W2(silu * self.W3(x))
 
 
-# TODO: implement softmax
+def softmax(tensor: torch.Tensor, dim: int = 0):
+    max_vals = torch.max(tensor, dim=dim, keepdim=True)[0]
+    num_part = torch.exp(tensor - max_vals)
+    div_term = torch.sum(num_part, dim=dim, keepdim=True)
+    return num_part / div_term
+
+
 # TODO: code organization to pass tests
 # TODO: improve general code structure
 
@@ -143,6 +149,7 @@ class PosWiseFFN(nn.Module):
 # TODO: train, Tiny
 # TODO: lr scheduler + gradient clipping
 
+# Speedrun
 # TODO: Muon
 
 
@@ -179,7 +186,7 @@ class MultiHeadSelfAttention(nn.Module):
         causal_mask = torch.tril(torch.ones((seq_length, seq_length))).to(q.device)
         mask = (causal_mask * (padding_mask.unsqueeze(1) if padding_mask is not None else 1)).unsqueeze(1)
         attention_scores = torch.masked_fill(attention_scores, mask == 0, -1e9)
-        attention_weights = torch.softmax(attention_scores / math.sqrt(self.head_size), dim=-1)
+        attention_weights = softmax(attention_scores / math.sqrt(self.head_size), dim=-1)
         # print(attention_weights[0][0])
         x = attention_weights @ v
         x = x.transpose(-2, -1).contiguous().view(batch, seq_length, -1)
