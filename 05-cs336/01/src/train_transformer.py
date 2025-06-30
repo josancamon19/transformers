@@ -6,12 +6,13 @@ from src.transformer import Transformer
 from torch.optim import AdamW
 import torch.nn.functional as F
 import os
+import wandb
 
-os.makedirs("./models", exist_ok=True)
+os.makedirs("./.models", exist_ok=True)
 
 
 class PretrainDataset(Dataset):
-    def __init__(self, tokenizer: GPT2Tokenizer, dataset_path: str, max_sequence_length: int):
+    def __init__(self, tokenizer: GPT2Tokenizer, dataset_path: str, max_sequence_length: int, max_samples: int = None):
         self.samples = []
         self.dataset_path = dataset_path
         # with open(dataset_path, "rb") as f:
@@ -20,6 +21,8 @@ class PretrainDataset(Dataset):
         with open(dataset_path, "r", encoding="utf-8", errors="ignore") as f:
             current_pos = 0
             for line in f:
+                if max_samples and len(self.samples) >= max_samples:
+                    break
                 if "<|endoftext|>" in line:
                     parts = line.split("<|endoftext|>")
                     for i, part in enumerate(parts[:-1]):  # Skip last empty part
@@ -59,6 +62,17 @@ class PretrainDataset(Dataset):
         }
 
 
+def save_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer, path: str):
+    data = {"model": model.state_dict(), "optimizer": optimizer.state_dict()}
+    torch.save(data, path)
+
+
+def load_checkpoint(model: torch.nn.Module, optimizer: torch.optim.Optimizer, path: str):
+    saved = torch.load(path)
+    model.load_state_dict(saved["model"])
+    optimizer.load_state_dict(saved["optimizer"])
+
+
 def train():
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
@@ -68,9 +82,10 @@ def train():
     embedding_dim = 128
     num_layers = 2
     num_heads = 8
+    use_checkpoint, load_at_epoch = True, 48
 
-    train_dataset = PretrainDataset(tokenizer, "data/owt_train.txt", max_sequence_length)
-    valid_dataset = PretrainDataset(tokenizer, "data/owt_valid.txt", max_sequence_length)
+    train_dataset = PretrainDataset(tokenizer, "data/owt_train.txt", max_sequence_length, 16)
+    valid_dataset = PretrainDataset(tokenizer, "data/owt_valid.txt", max_sequence_length, 16)
     train_dataloader = DataLoader(
         train_dataset, batch_size, shuffle=True, collate_fn=train_dataset.collate_fn, pin_memory=True
     )
@@ -81,8 +96,20 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    epochs = 10
-    optim = AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+    lr = 1e-4
+    weight_decay = 0.01
+    epochs = 100
+
+    run = wandb.init(
+        project="cs336-assignment-01",
+        config={"learning_rate": lr, "weight_decay": weight_decay, "epochs": epochs},
+    )
+
+    optim = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    if use_checkpoint:
+        # TODO: load wandb later. (continue it)
+        model, optim = load_checkpoint(model, optim, f"./.models/gpt2-epoch-{load_at_epoch}.pt")
 
     def compute_inputs_loss(batch):
         input_ids = batch["input_ids"][:, :-1].to(device)
@@ -104,9 +131,10 @@ def train():
         for batch in tqdm(train_dataloader, desc=f"train-epoch {i + 1}"):
             optim.zero_grad()
             loss = compute_inputs_loss(batch)
-            print("loss:", loss.item())
             train_loss += loss.item()
             loss.backward()
+            # TODO: implement manually
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optim.step()
 
         train_loss = train_loss / len(train_dataloader)
@@ -122,8 +150,9 @@ def train():
         print(f"epoch {i + 1} valid_loss: {valid_loss}")
         if valid_loss < best_valid_loss:
             best_valid_loss = valid_loss
-            data = {"model": model.state_dict(), "optimizer": optim.state_dict()}
-            torch.save(data, f"./models/gpt2-epoch-{i + 1}.pt")
+            save_checkpoint(model, optim, f"./.models/gpt2-epoch-{i + 1}.pt")
+
+        run.log({"train_loss": train_loss, "valid_loss": valid_loss})
 
 
 train()

@@ -169,3 +169,4 @@ result.json
 *hf.json
 *sample_file.txt
 tests/fixtures/snapshots/*.json
+.models
