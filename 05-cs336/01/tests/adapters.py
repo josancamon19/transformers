@@ -9,7 +9,18 @@ import numpy.typing as npt
 import torch
 from torch import Tensor
 from cs336_basics import tokenizer, train_tokenizer
-from cs336_basics import train_tokenizer_
+from cs336_basics.transformer import (
+    Linear,
+    Embedding,
+    RMSNorm,
+    get_rope_cache,
+    apply_rope,
+    softmax,
+    PosWiseFFN,
+    Transformer,
+    TransformerBlock,
+    MultiHeadSelfAttention,
+)
 
 
 def run_linear(
@@ -31,7 +42,10 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    raise NotImplementedError
+    linear = Linear(d_in, d_out)
+    linear.weights.data = weights
+    output = linear(in_features)
+    return output
 
 
 def run_embedding(
@@ -52,8 +66,9 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-
-    raise NotImplementedError
+    e = Embedding(vocab_size, d_model)
+    e.embeddings.data = weights
+    return e(token_ids)
 
 
 def run_swiglu(
@@ -140,7 +155,12 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    attention = MultiHeadSelfAttention(d_model, num_heads, 1024)
+    attention.Q.weights.data = q_proj_weight
+    attention.K.weights.data = k_proj_weight
+    attention.V.weights.data = v_proj_weight
+    attention.W_O.weights.data = o_proj_weight
+    return attention(in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -202,6 +222,8 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
+    cache = get_rope_cache(d_k, theta, max_seq_len)
+    apply_rope()
     raise NotImplementedError
 
 
@@ -380,7 +402,9 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    rms = RMSNorm(d_model, eps)
+    rms.gain.data = weights
+    return rms(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
